@@ -1,4 +1,5 @@
 import os
+import asyncio
 
 from agent.tools_and_schemas import SearchQueryList, Reflection
 from dotenv import load_dotenv
@@ -7,7 +8,6 @@ from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
-from google.genai import Client
 
 from agent.state import (
     OverallState,
@@ -23,28 +23,32 @@ from agent.prompts import (
     reflection_instructions,
     answer_instructions,
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
+from agent.ark_client import AsyncArkLLMClient, ArkMessage
+from agent.web_search_client import CustomWebSearchClient, WebSearchRequest
 from agent.utils import (
-    get_citations,
     get_research_topic,
-    insert_citation_markers,
-    resolve_urls,
 )
 
 load_dotenv()
 
-if os.getenv("GEMINI_API_KEY") is None:
-    raise ValueError("GEMINI_API_KEY is not set")
+if os.getenv("ARK_API_KEY") is None:
+    raise ValueError("ARK_API_KEY is not set")
 
-# Used for Google Search API
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+if os.getenv("ARK_BASE_URL") is None:
+    raise ValueError("ARK_BASE_URL is not set")
+
+if os.getenv("WEB_SEARCH_BASE_URL") is None:
+    raise ValueError("WEB_SEARCH_BASE_URL is not set")
+
+# Initialize custom web search client
+web_search_client = CustomWebSearchClient(base_url=os.getenv("WEB_SEARCH_BASE_URL"))
 
 
 # Nodes
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     """LangGraph node that generates search queries based on the User's question.
 
-    Uses Gemini 2.0 Flash to create an optimized search queries for web research based on
+    Uses Ark LLM to create an optimized search queries for web research based on
     the User's question.
 
     Args:
@@ -60,12 +64,11 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
 
-    # init Gemini 2.0 Flash
-    llm = ChatGoogleGenerativeAI(
-        model=configurable.query_generator_model,
-        temperature=1.0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
+    # init Ark LLM
+    llm = AsyncArkLLMClient(
+        api_key=os.getenv("ARK_API_KEY"),
+        base_url=os.getenv("ARK_BASE_URL"),
+        model_id=configurable.flash_model,
     )
     structured_llm = llm.with_structured_output(SearchQueryList)
 
@@ -77,7 +80,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
         number_queries=state["initial_search_query_count"],
     )
     # Generate the search queries
-    result = structured_llm.invoke(formatted_prompt)
+    result = structured_llm.invoke(formatted_prompt, temperature=1.0)
     return {"search_query": result.query}
 
 
@@ -93,9 +96,9 @@ def continue_to_web_research(state: QueryGenerationState):
 
 
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs web research using the native Google Search API tool.
+    """LangGraph node that performs web research using the custom web search API.
 
-    Executes a web search using the native Google Search API tool in combination with Gemini 2.0 Flash.
+    Executes a web search using the custom web search API and then uses Ark LLM to synthesize the results.
 
     Args:
         state: Current graph state containing the search query and research loop count
@@ -106,33 +109,71 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     # Configure
     configurable = Configuration.from_runnable_config(config)
+    
+    # Create search request
+    search_request = WebSearchRequest(queries=[state["search_query"]])
+    
+    # Perform web search
+    async def do_search():
+        return await web_search_client.web_search(search_request)
+    
+    # Run the async search
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        search_response = loop.run_until_complete(do_search())
+    finally:
+        loop.close()
+    
+    # Format search results for LLM
+    search_results_text = ""
+    sources_gathered = []
+    
+    for idx, item in enumerate(search_response.data.items):
+        short_url = f"[{idx+1}]"
+        search_results_text += f"\n\n{short_url} {item.title}\nURL: {item.url}\nContent: {item.content}\n"
+        
+        # Extract domain name for label (similar to original implementation)
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(item.url).netloc
+            # Remove www. prefix and split by . to get main domain name
+            label = domain.replace('www.', '').split('.')[0] if domain else item.title[:20]
+        except:
+            # Fallback to first few words of title
+            label = ' '.join(item.title.split()[:3]) if item.title else f"source_{idx+1}"
+        
+        sources_gathered.append({
+            "short_url": short_url,
+            "value": item.url,
+            "title": item.title,
+            "content": item.content[:1000] + "..." if len(item.content) > 1000 else item.content,
+            "label": label  # This is what the frontend needs for "Related to:"
+        })
+    
+    # Use Ark LLM to synthesize the search results
     formatted_prompt = web_searcher_instructions.format(
         current_date=get_current_date(),
         research_topic=state["search_query"],
+    ) + f"\n\nSearch Results:{search_results_text}"
+    
+    llm = AsyncArkLLMClient(
+        api_key=os.getenv("ARK_API_KEY"),
+        base_url=os.getenv("ARK_BASE_URL"),
+        model_id=configurable.flash_model,
     )
-
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
-        model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
-    )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
+    
+    response_text = llm.invoke(formatted_prompt, temperature=0)
+    
+    # Add citation markers to the response
+    for i, source in enumerate(sources_gathered):
+        citation_marker = f"[{i+1}]"
+        response_text = response_text.replace(citation_marker, f"[{source['title']}]({source['value']})")
 
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state["search_query"]],
-        "web_research_result": [modified_text],
+        "web_research_result": [response_text],
     }
 
 
@@ -154,6 +195,10 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # Increment the research loop count and get the reasoning model
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
     reasoning_model = state.get("reasoning_model", configurable.reflection_model)
+    
+    # Fallback to default if old Gemini model names are used
+    if reasoning_model and "gemini" in reasoning_model.lower():
+        reasoning_model = configurable.reflection_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -162,14 +207,13 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         research_topic=get_research_topic(state["messages"]),
         summaries="\n\n---\n\n".join(state["web_research_result"]),
     )
-    # init Reasoning Model
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
-        temperature=1.0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
+    # init Ark LLM
+    llm = AsyncArkLLMClient(
+        api_key=os.getenv("ARK_API_KEY"),
+        base_url=os.getenv("ARK_BASE_URL"),
+        model_id=reasoning_model,
     )
-    result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+    result = llm.with_structured_output(Reflection).invoke(formatted_prompt, temperature=1.0)
 
     return {
         "is_sufficient": result.is_sufficient,
@@ -232,6 +276,10 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     """
     configurable = Configuration.from_runnable_config(config)
     reasoning_model = state.get("reasoning_model") or configurable.answer_model
+    
+    # Fallback to default if old Gemini model names are used
+    if reasoning_model and "gemini" in reasoning_model.lower():
+        reasoning_model = configurable.answer_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -241,26 +289,25 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         summaries="\n---\n\n".join(state["web_research_result"]),
     )
 
-    # init Reasoning Model, default to Gemini 2.5 Flash
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
-        temperature=0,
-        max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
+    # init Ark LLM
+    llm = AsyncArkLLMClient(
+        api_key=os.getenv("ARK_API_KEY"),
+        base_url=os.getenv("ARK_BASE_URL"),
+        model_id=reasoning_model,
     )
-    result = llm.invoke(formatted_prompt)
+    response_content = llm.invoke(formatted_prompt, temperature=0)
 
     # Replace the short urls with the original urls and add all used urls to the sources_gathered
     unique_sources = []
     for source in state["sources_gathered"]:
-        if source["short_url"] in result.content:
-            result.content = result.content.replace(
+        if source["short_url"] in response_content:
+            response_content = response_content.replace(
                 source["short_url"], source["value"]
             )
             unique_sources.append(source)
 
     return {
-        "messages": [AIMessage(content=result.content)],
+        "messages": [AIMessage(content=response_content)],
         "sources_gathered": unique_sources,
     }
 
