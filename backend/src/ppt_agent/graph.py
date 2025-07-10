@@ -6,7 +6,6 @@ from typing import Dict, Any, List, cast, TypedDict, Optional, Annotated, operat
 
 from dotenv import load_dotenv
 from langgraph.types import Send
-from langgraph.graph import StateGraph, START, END
 from langchain_core.runnables import RunnableConfig
 
 from ppt_agent.state import (
@@ -28,17 +27,16 @@ from ppt_agent.prompts import (
     web_results_summary_prompt,
     research_reflection_prompt,
 )
-from ppt_agent.tools_and_schemas import SearchQueryList, PPTLLMTools
+from ppt_agent.tools_and_schemas import PPTLLMTools
 from ppt_agent.utils import (
     get_user_request,
-    extract_ref_documents,
     parse_json_response,
     get_consecutive_search_count,
 )
 
 # Import shared components from agent module
 from agent.ark_client import AsyncArkLLMClient
-from agent.web_search_client import CustomWebSearchClient, WebSearchRequest
+from ppt_agent.web_search_client import CustomWebSearchClient, WebSearchRequest
 
 load_dotenv()
 
@@ -155,7 +153,7 @@ async def coordinator_node(
 
     except Exception as e:
         logger.error(f"Error in coordinator node at step unknown: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error ~type: {type(e).__name__}")
         import traceback
 
         logger.error(f"Full traceback: {traceback.format_exc()}")
@@ -373,6 +371,7 @@ async def gen_outline_node(
             user_request=user_request,
             reference_material=ref_docs,
             total_pages=total_pages,
+            current_date=get_current_date(),
         )
 
         logger.info(f"Calling LLM with prompt length: {len(prompt)} characters")

@@ -5,37 +5,6 @@ def get_current_date():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-# Prompt for determining if web search is needed
-determine_search_need_instructions = """You are a PPT creation assistant. Analyze the user's request and determine if web search is needed to gather current information.
-
-Instructions:
-- If the user's request requires current information, recent data, or specific facts that need to be researched, respond with True
-- If the user's request is general, conceptual, or can be fulfilled with common knowledge, respond with False
-- Consider topics like: current events, statistics, recent developments, specific companies/products, etc. as requiring search
-
-User Request: {user_request}
-
-Respond with only "True" or "False"."""
-
-
-# Prompt for generating search queries (similar to agent/prompts.py)
-ppt_search_query_instructions = """Generate web search queries to gather information for PPT creation about: {user_request}
-
-Instructions:
-- Generate 2-3 focused search queries to gather relevant, current information
-- Queries should target factual information, statistics, recent developments
-- Each query should focus on a specific aspect
-- Current date: {current_date}
-
-Format your response as a JSON object:
-{{
-    "rationale": "Brief explanation of why these queries are relevant",
-    "query": ["query1", "query2", "query3"]
-}}
-
-User Request: {user_request}"""
-
-
 # Prompt for PPT outline generation (from original ppt_agent_omni.py)
 brief_outline_prompt = """你是一名专业的PPT制作专家，专门负责根据用户需求和参考资料生成详细的PPT大纲。
 
@@ -47,6 +16,8 @@ brief_outline_prompt = """你是一名专业的PPT制作专家，专门负责根
 
 页数要求：
 {total_pages} # 一共生成多少页
+
+当前时间：{current_date}
 
 请根据用户需求和参考资料，生成一个详细的PPT大纲。请确保：
 
@@ -77,22 +48,6 @@ brief_outline_prompt = """你是一名专业的PPT制作专家，专门负责根
 - current_slide_page_counts表示这个主题需要几页
 - picture_advise数组可以为空，只在需要图片时提供搜索词建议，要保持简洁
 - 确保内容结构完整，涵盖用户需求的所有重要方面"""
-
-
-# Prompt for web search synthesis (similar to agent/prompts.py)
-ppt_web_search_synthesis = """Synthesize the following web search results for PPT creation purposes.
-
-Instructions:
-- Focus on key facts, statistics, and current information
-- Organize information in a structured way suitable for PPT content
-- Include source citations
-- Current date: {current_date}
-
-Research Topic: {research_topic}
-
-Search Results: {search_results}
-
-Provide a well-structured summary that can be used for PPT creation."""
 
 
 # Prompt for research reflection - determines if more search is needed

@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional, Type, ClassVar
 from pydantic import BaseModel, Field
+from agent.web_search_client import WebSearchRequest
 
 
 class ArkSchemaTool:
@@ -21,68 +22,6 @@ class ArkSchemaTool:
                 },
             },
         }
-
-
-# Base Schema Models
-class SearchQueryList(BaseModel):
-    """Schema for search query generation"""
-
-    query: List[str] = Field(
-        description="A list of search queries to be used for web research."
-    )
-    rationale: str = Field(
-        description="A brief explanation of why these queries are relevant to the research topic."
-    )
-
-
-class PPTOutline(BaseModel):
-    """Schema for PPT outline structure"""
-
-    ppt_title: str = Field(description="The main title of the PPT")
-    slides: List[Dict[str, Any]] = Field(
-        description="List of slides with their content structure"
-    )
-
-
-# Web Search Models
-class WebSearchRequest(BaseModel):
-    """Base model for web search with all validation logic"""
-
-    queries: List[str] = Field(
-        ...,
-        description="List of search terms to find web pages for. Each query should be specific and focused. Examples: ['人工智能 2025', '机器学习 应用案例', '深度学习技术 进展', 'AI 医疗领域 应用']",
-        min_items=1,
-        max_items=10,
-    )
-
-
-class WebSearchItem(BaseModel):
-    url: str
-    title: str
-    content: str
-
-
-class WebSearchData(BaseModel):
-    items: List[WebSearchItem]
-    count: int
-
-
-class WebSearchResponse(BaseModel):
-    code: int
-    message: str
-    data: WebSearchData
-
-    def get_stats(self) -> str:
-        """Get formatted statistics about the search results"""
-        total_results = len(self.data.items)
-        if total_results == 0:
-            return "found 0 results"
-
-        # Calculate average content length
-        total_length = sum(len(item.content) for item in self.data.items)
-        avg_length = total_length / total_results if total_results > 0 else 0
-
-        return f"found {total_results} results (avg content length: {avg_length:.0f} chars)"
 
 
 # PPT Tool Models
@@ -185,23 +124,3 @@ class PPTLLMTools:
     def get_tool_schemas() -> List[Dict[str, Any]]:
         """Get all tool schemas in Ark format for LLM integration"""
         return [tool_cls.to_ark_schema() for tool_cls in PPTLLMTools.get_all_tools()]
-
-
-# Legacy models for backward compatibility
-class PPTGenerationRequest(BaseModel):
-    """Schema for PPT generation request (legacy)"""
-
-    user_request: str = Field(description="The user's request for PPT creation")
-    theme: str = Field(default="professional", description="Theme for the PPT")
-    total_pages: int = Field(
-        default=10, description="Total number of pages for the PPT"
-    )
-
-
-class PPTModificationRequest(BaseModel):
-    """Schema for PPT modification request (legacy)"""
-
-    page_number: int = Field(description="The page number to modify")
-    modification_suggestions: str = Field(
-        description="Suggestions for modifying the specified page"
-    )
