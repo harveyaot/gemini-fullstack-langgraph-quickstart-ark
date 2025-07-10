@@ -10,9 +10,7 @@ class PPTConfiguration(BaseModel):
 
     main_model: str = Field(
         default="ep-20250611103625-7trbw",
-        metadata={
-            "description": "The main language model to use for PPT generation."
-        },
+        metadata={"description": "The main language model to use for PPT generation."},
     )
 
     flash_model: str = Field(
@@ -46,14 +44,11 @@ class PPTConfiguration(BaseModel):
         metadata={"description": "Default number of pages for PPT generation."},
     )
 
-    max_research_loops: int = Field(
-        default=1,
-        metadata={"description": "Maximum number of research loops for web search."},
-    )
-
-    max_research_rounds: int = Field(
-        default=3,
-        metadata={"description": "Maximum number of consecutive web search rounds before forcing different tool."},
+    max_consecutive_search_count: int = Field(
+        default=2,
+        metadata={
+            "description": "Maximum number of consecutive web search calls before blocking further searches."
+        },
     )
 
     @classmethod
@@ -74,4 +69,4 @@ class PPTConfiguration(BaseModel):
         # Filter out None values
         values = {k: v for k, v in raw_values.items() if v is not None}
 
-        return cls(**values) 
+        return cls(**values)
