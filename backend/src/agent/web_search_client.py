@@ -90,7 +90,7 @@ class ImageSearchRequest(BaseModel):
         ...,
         description="List of search terms to find images for. Each query should be descriptive and specific. Examples: ['现代办公大楼', '玻璃幕墙设计', '绿色建筑外观', '智能建筑系统']",
         min_items=1,
-        max_items=5,
+        max_items=10,
     )
     background: str = Field(
         default="",

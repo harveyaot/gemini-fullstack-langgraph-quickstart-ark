@@ -1,8 +1,33 @@
 from datetime import datetime
+import os
+import asyncio
 
 
 def get_current_date():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _read_prompt_template(file_name: str) -> str:
+    """Helper function to read a prompt template from the prompts directory."""
+    # Try to get prompts path from environment variable first
+    prompts_base_path = os.getenv("PROMPTS_PATH")
+
+    if prompts_base_path:
+        prompt_path = os.path.join(prompts_base_path, file_name)
+    else:
+        # Fallback to relative path if environment variable is not set
+        prompt_path = os.path.join(os.path.dirname(__file__), "prompts", file_name)
+
+    def _read_file(path):
+        """Synchronous file reading function to be run in thread."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            raise
+
+    # Use asyncio.to_thread to avoid blocking the event loop
+    return await asyncio.to_thread(_read_file, prompt_path)
 
 
 # Prompt for PPT outline generation (from original ppt_agent_omni.py)
@@ -171,3 +196,50 @@ ppt_coordinator_prompt = """## 角色定义
 - **减少交互**：采用陈述句表达，如 "将按以下关键词搜索"，而非反问句，减少不必要的交互环节。
 
 请提供 PPT 主题及背景信息，启动制作流程。"""
+
+
+async def get_detailed_outline_prompt(user_request, brief_outline, reference_material):
+    """Loads and formats the detailed outline prompt from gen_detailed_outline.txt."""
+    template = await _read_prompt_template("gen_detailed_outline.txt")
+
+    # Replace the placeholders with actual values
+    prompt = template.replace("{{USER_QUERY}}", user_request or "")
+    prompt = prompt.replace("{{REFERENCE_MATERIAL}}", reference_material or "")
+    prompt = prompt.replace("{{GENERATED_OUTLINE}}", brief_outline or "")
+
+    return f"{prompt}\n\n当前时间: {get_current_date()}"
+
+
+async def get_style_layout_prompt(user_request, ppt_outline):
+    """Loads and formats the style layout prompt from gen_style_layout.txt."""
+    template = await _read_prompt_template("gen_style_layout.txt")
+
+    # Map function parameters to template placeholders
+    # user_request maps to user_intent (user_request)
+    # ppt_outline maps to raw_outline (detailed outline)
+    prompt = template.replace("{{user_intent}}", user_request or "")
+    prompt = prompt.replace("{{raw_outline}}", ppt_outline or "")
+
+    return f"{prompt}\n\n当前时间: {get_current_date()}"
+
+
+async def get_template_prompt(style_layout):
+    """Loads and formats the template generation prompt from gen_template.txt."""
+    template = await _read_prompt_template("gen_template.txt")
+
+    # Replace the placeholder with the style_layout content
+    prompt = template.replace("{{ OUTLINE_WITH_STYLE_LAYOUT }}", style_layout or "")
+
+    return f"{prompt}\n\n当前时间: {get_current_date()}"
+
+
+async def get_html_code_prompt(slide_number, ppt_input, template_html):
+    """Loads and formats the HTML code generation prompt from gen_html.txt."""
+    template = await _read_prompt_template("gen_html.txt")
+
+    # Replace the placeholders according to the prompt file structure
+    prompt = template.replace("{{i}}", str(slide_number))
+    prompt = prompt.replace("{{ppt_input}}", ppt_input or "")
+    prompt = prompt.replace("{{ template_html }}", template_html or "")
+
+    return f"{prompt}\n\n当前时间: {get_current_date()}"

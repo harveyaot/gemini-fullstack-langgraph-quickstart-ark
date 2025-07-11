@@ -13,10 +13,10 @@ from ppt_agent.state import (
     CoordinatorInputState,
     WebSearchInputState,
     OutlineInputState,
-    HtmlInputState,
     ModifyInputState,
     ThemeAndPagesAckInputState,
     FinalizeInputState,
+    HtmlInputState,
     ExecutionRecord,
 )
 from ppt_agent.configuration import PPTConfiguration
@@ -36,7 +36,16 @@ from ppt_agent.utils import (
 
 # Import shared components from agent module
 from agent.ark_client import AsyncArkLLMClient
-from ppt_agent.web_search_client import CustomWebSearchClient, WebSearchRequest
+from agent.web_search_client import CustomWebSearchClient, WebSearchRequest
+
+# Import new nodes
+from ppt_agent.intra_nodes import (
+    image_search_node,
+    gen_detailed_outline_node,
+    gen_style_layout_node,
+    gen_template_node,
+    gen_html_code_node,
+)
 
 load_dotenv()
 
@@ -65,20 +74,6 @@ async def coordinator_node(
     Uses LLM to determine workflow and tool selection based on conversation context.
     """
     configurable = PPTConfiguration.from_runnable_config(config)
-    logger.info("Executing coordinator node...")
-    logger.info(f"State keys: {list(state.keys())}")
-    logger.info(f"Number of messages in state: {len(state.get('messages', []))}")
-
-    # Log the last few messages for context
-    messages_in_state = state.get("messages", [])
-    if messages_in_state:
-        logger.info("Last few messages:")
-        for i, msg in enumerate(messages_in_state[-3:], 1):
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            content_preview = content[:100] + "..." if len(content) > 100 else content
-            logger.info(f"  Message {i}: {role} - {content_preview}")
-
     try:
         logger.info("Step 1: Initializing LLM client...")
         # Initialize LLM client
@@ -134,7 +129,8 @@ async def coordinator_node(
 
             logger.info(f"Step 6: Tool args parsed successfully")
 
-            return {
+            # Prepare return state
+            return_state = {
                 # need to add the tool_calls to the messages
                 "messages": [
                     {"role": "assistant", "content": content, "tool_calls": tool_calls}
@@ -142,6 +138,12 @@ async def coordinator_node(
                 "next_tool": tool_call["function"]["name"],
                 "tool_args": tool_args,
             }
+
+            # Save tool_call_id when routing to HTML generation
+            if tool_call["function"]["name"] == "generate_ppt_html":
+                return_state["gen_html_tool_call_id"] = tool_call["id"]
+
+            return return_state
         else:
             logger.info("Step 6: No tool calls, proceeding to finalization...")
             # No tool call, proceed to finalization
@@ -158,8 +160,7 @@ async def coordinator_node(
 
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return {
-            "messages": state["messages"]
-            + [{"role": "assistant", "content": f"处理请求时出错：{str(e)}"}],
+            "messages": [{"role": "assistant", "content": f"处理请求时出错：{str(e)}"}],
             "next_tool": "finalize",
             "tool_args": None,
         }
@@ -438,6 +439,11 @@ async def gen_outline_node(
                 "next_tool": "coordinator",
                 "tool_args": None,
                 "ppt_outline": outline_data,  # Store outline in state for HTML generation
+                "brief_outline": (
+                    json.dumps(outline_data, ensure_ascii=False, indent=2)
+                    if outline_data
+                    else ""
+                ),  # Store as formatted JSON string for prompt replacement
                 "tool_execution_history": [
                     execution_record.model_dump()
                 ],  # New execution to add
@@ -460,58 +466,6 @@ async def gen_outline_node(
                     execution_record.model_dump()
                 ],  # New execution to add
             }
-
-
-async def gen_html_node(
-    state: HtmlInputState, config: RunnableConfig
-) -> PPTOverallState:
-    """Generate PPT HTML based on outline"""
-    configurable = PPTConfiguration.from_runnable_config(config)
-    logger.info("Generating PPT HTML...")
-
-    tool_message = None
-    error_message = None
-    html_data = None
-
-    # Get input fields directly from state
-    user_request = state["user_request"]
-    ppt_outline = state["ppt_outline"]
-    theme = state.get("theme", "professional")  # Optional with default
-    tool_call_id = state["tool_call_id"]  # Get tool_call_id from state
-
-    # Format HTML response
-    html_response = {
-        "code": 0,
-        "message": "Successfully generated PPT HTML on remote server",
-        "data": {
-            "html_remote_address": "https://ppt.remotesave.com/ppt/1234567890",  # Placeholder
-            "theme": theme,
-        },
-    }
-
-    # Create tool message
-    tool_message = {
-        "role": "tool",
-        "tool_call_id": tool_call_id,  # Use tool_call_id from state
-        "name": "GenPptHtml",
-        "content": json.dumps(html_response),
-    }
-
-    # Add execution record to history
-    execution_record = ExecutionRecord(
-        tool_name="gen_ppt_html",
-        status="succeeded",
-        result={"theme": theme, "html_generated": True},
-    )
-
-    return {
-        "messages": [tool_message],  # Return as list of dict messages
-        "next_tool": "coordinator",
-        "tool_args": None,
-        "tool_execution_history": [
-            execution_record.model_dump()
-        ],  # New execution to add
-    }
 
 
 async def modify_html_node(
@@ -846,7 +800,11 @@ def create_ppt_graph():
     )  # Add new node
     builder.add_node("theme_and_pages_ack_node", theme_and_pages_ack_node)
     builder.add_node("gen_outline_node", gen_outline_node)
-    builder.add_node("gen_html_node", gen_html_node)
+    builder.add_node("image_search_node", image_search_node)  # Add image search node
+    builder.add_node("gen_detailed_outline_node", gen_detailed_outline_node)
+    builder.add_node("gen_style_layout_node", gen_style_layout_node)
+    builder.add_node("gen_template_node", gen_template_node)
+    builder.add_node("gen_html_code_node", gen_html_code_node)
     builder.add_node("modify_html_node", modify_html_node)
     builder.add_node("finalize_response_node", finalize_response_node)
 
@@ -859,10 +817,9 @@ def create_ppt_graph():
         route_to_tool_node,
         [
             "web_search_node",
-            # Remove "research_reflection_node" from coordinator routes since it only comes from web_search
             "theme_and_pages_ack_node",
             "gen_outline_node",
-            "gen_html_node",
+            "gen_style_layout_node",
             "modify_html_node",
             "finalize_response_node",
         ],
@@ -880,8 +837,17 @@ def create_ppt_graph():
 
     # Other tool nodes return to coordinator for next step decision
     builder.add_edge("theme_and_pages_ack_node", "coordinator_node")
-    builder.add_edge("gen_outline_node", "coordinator_node")
-    builder.add_edge("gen_html_node", "coordinator_node")
+
+    # Group 1: Outline Generation Workflow (3 steps: outline -> image search -> detailed outline)
+    builder.add_edge("gen_outline_node", "image_search_node")
+    builder.add_edge("image_search_node", "gen_detailed_outline_node")
+    builder.add_edge("gen_detailed_outline_node", "coordinator_node")
+
+    # Group 2: HTML Generation Workflow (3 steps)
+    builder.add_edge("gen_style_layout_node", "gen_template_node")
+    builder.add_edge("gen_template_node", "gen_html_code_node")
+    builder.add_edge("gen_html_code_node", "coordinator_node")
+
     builder.add_edge("modify_html_node", "coordinator_node")
 
     # Only finalize connects to end
@@ -935,7 +901,7 @@ def route_to_tool_node(state: PPTOverallState) -> Send:
         return Send("theme_and_pages_ack_node", specific_state)
 
     elif next_tool == "generate_ppt_outline":
-        # Outline node needs user request, ref documents, and total pages
+        # Outline group entry point - starts with brief outline generation
         user_request = tool_args.get("user_request", get_user_request(messages))
         ref_documents = "\n\n---\n\n".join(state.get("web_results_summary", []))
         total_pages = tool_args.get("total_pages", state.get("total_pages", 10))
@@ -948,18 +914,19 @@ def route_to_tool_node(state: PPTOverallState) -> Send:
         return Send("gen_outline_node", specific_state)
 
     elif next_tool == "generate_ppt_html":
-        # HTML node needs user request, outline, and theme
+        # HTML generation group entry point - starts with style layout
         user_request = tool_args.get("user_request", get_user_request(messages))
-        ppt_outline = state.get("ppt_outline", {})
+        ppt_outline = state.get("ppt_outline", {})  # Brief outline
+        detailed_outline = state.get("detailed_outline", [])  # Detailed outline
         theme = tool_args.get("theme", state.get("theme", "professional"))
-
         specific_state = HtmlInputState(
             user_request=user_request,
             ppt_outline=ppt_outline,
+            detailed_outline=detailed_outline,
             theme=theme,
             tool_call_id=tool_call_id,
         )
-        return Send("gen_html_node", specific_state)
+        return Send("gen_style_layout_node", specific_state)
 
     elif next_tool == "modify_ppt_html":
         # Modify node needs page number and modification suggestions
