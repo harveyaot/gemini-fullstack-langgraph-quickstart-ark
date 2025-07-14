@@ -109,14 +109,14 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     # Configure
     configurable = Configuration.from_runnable_config(config)
-    
+
     # Create search request
     search_request = WebSearchRequest(queries=[state["search_query"]])
-    
+
     # Perform web search
     async def do_search():
         return await web_search_client.web_search(search_request)
-    
+
     # Run the async search
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -124,51 +124,69 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         search_response = loop.run_until_complete(do_search())
     finally:
         loop.close()
-    
+
     # Format search results for LLM
     search_results_text = ""
     sources_gathered = []
-    
+
     for idx, item in enumerate(search_response.data.items):
         short_url = f"[{idx+1}]"
-        search_results_text += f"\n\n{short_url} {item.title}\nURL: {item.url}\nContent: {item.content}\n"
-        
+        search_results_text += (
+            f"\n\n{short_url} {item.title}\nURL: {item.url}\nContent: {item.content}\n"
+        )
+
         # Extract domain name for label (similar to original implementation)
         try:
             from urllib.parse import urlparse
+
             domain = urlparse(item.url).netloc
             # Remove www. prefix and split by . to get main domain name
-            label = domain.replace('www.', '').split('.')[0] if domain else item.title[:20]
+            label = (
+                domain.replace("www.", "").split(".")[0] if domain else item.title[:20]
+            )
         except:
             # Fallback to first few words of title
-            label = ' '.join(item.title.split()[:3]) if item.title else f"source_{idx+1}"
-        
-        sources_gathered.append({
-            "short_url": short_url,
-            "value": item.url,
-            "title": item.title,
-            "content": item.content[:1000] + "..." if len(item.content) > 1000 else item.content,
-            "label": label  # This is what the frontend needs for "Related to:"
-        })
-    
+            label = (
+                " ".join(item.title.split()[:3]) if item.title else f"source_{idx+1}"
+            )
+
+        sources_gathered.append(
+            {
+                "short_url": short_url,
+                "value": item.url,
+                "title": item.title,
+                "content": (
+                    item.content[:1000] + "..."
+                    if len(item.content) > 1000
+                    else item.content
+                ),
+                "label": label,  # This is what the frontend needs for "Related to:"
+            }
+        )
+
     # Use Ark LLM to synthesize the search results
-    formatted_prompt = web_searcher_instructions.format(
-        current_date=get_current_date(),
-        research_topic=state["search_query"],
-    ) + f"\n\nSearch Results:{search_results_text}"
-    
+    formatted_prompt = (
+        web_searcher_instructions.format(
+            current_date=get_current_date(),
+            research_topic=state["search_query"],
+        )
+        + f"\n\nSearch Results:{search_results_text}"
+    )
+
     llm = AsyncArkLLMClient(
         api_key=os.getenv("ARK_API_KEY"),
         base_url=os.getenv("ARK_BASE_URL"),
         model_id=configurable.flash_model,
     )
-    
+
     response_text = llm.invoke(formatted_prompt, temperature=0)
-    
+
     # Add citation markers to the response
     for i, source in enumerate(sources_gathered):
         citation_marker = f"[{i+1}]"
-        response_text = response_text.replace(citation_marker, f"[{source['title']}]({source['value']})")
+        response_text = response_text.replace(
+            citation_marker, f"[{source['title']}]({source['value']})"
+        )
 
     return {
         "sources_gathered": sources_gathered,
@@ -195,7 +213,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # Increment the research loop count and get the reasoning model
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
     reasoning_model = state.get("reasoning_model", configurable.reflection_model)
-    
+
     # Fallback to default if old Gemini model names are used
     if reasoning_model and "gemini" in reasoning_model.lower():
         reasoning_model = configurable.reflection_model
@@ -213,7 +231,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         base_url=os.getenv("ARK_BASE_URL"),
         model_id=reasoning_model,
     )
-    result = llm.with_structured_output(Reflection).invoke(formatted_prompt, temperature=1.0)
+    result = llm.with_structured_output(Reflection).invoke(
+        formatted_prompt, temperature=1.0
+    )
 
     return {
         "is_sufficient": result.is_sufficient,
@@ -276,7 +296,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     """
     configurable = Configuration.from_runnable_config(config)
     reasoning_model = state.get("reasoning_model") or configurable.answer_model
-    
+
     # Fallback to default if old Gemini model names are used
     if reasoning_model and "gemini" in reasoning_model.lower():
         reasoning_model = configurable.answer_model

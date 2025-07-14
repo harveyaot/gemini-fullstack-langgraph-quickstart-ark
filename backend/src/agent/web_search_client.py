@@ -1,7 +1,8 @@
 import os
 import aiohttp
+import ssl
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -107,9 +108,28 @@ class ImageSearchRequest(BaseModel):
 class CustomWebSearchClient:
     """Custom web search client for replacing Google Search API"""
 
-    def __init__(self, base_url: str):
+    def __init__(
+        self,
+        base_url: str,
+        verify_ssl: bool = False,
+        timeout: int = 30,
+        headers: Optional[Dict[str, str]] = None,
+    ):
         self.base_url = base_url
-        self.headers = {"Content-Type": "application/json"}
+        self.verify_ssl = verify_ssl
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.headers = headers or {"Content-Type": "application/json"}
+
+        # Create SSL context based on verification setting
+        if verify_ssl:
+            self.ssl_context = ssl.create_default_context()
+        else:
+            self.ssl_context = ssl.create_default_context()
+            self.ssl_context.check_hostname = False
+            self.ssl_context.verify_mode = ssl.CERT_NONE
+            logger.warning(
+                "SSL verification disabled - this is not recommended for production!"
+            )
 
     async def web_search(self, request: WebSearchRequest) -> WebSearchResponse:
         """
@@ -125,7 +145,9 @@ class CustomWebSearchClient:
         payload = request.model_dump()
         logger.debug(f"Making web search request to {url} with payload: {payload}")
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            timeout=self.timeout, connector=aiohttp.TCPConnector(ssl=self.ssl_context)
+        ) as session:
             async with session.post(
                 url, json=payload, headers=self.headers
             ) as response:
@@ -162,7 +184,9 @@ class CustomWebSearchClient:
         payload = request.model_dump()
         logger.debug(f"Making image search request to {url} with payload: {payload}")
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            timeout=self.timeout, connector=aiohttp.TCPConnector(ssl=self.ssl_context)
+        ) as session:
             async with session.post(
                 url, json=payload, headers=self.headers
             ) as response:

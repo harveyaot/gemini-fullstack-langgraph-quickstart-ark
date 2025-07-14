@@ -62,12 +62,22 @@ async def search_brief_outline_images(
         logger.info(
             f"[BriefImageSearch] Found {len(unique_queries)} unique image queries: {unique_queries}"
         )
-        # Use the new CustomWebSearchClient
-        base_url = os.getenv("WEB_SEARCH_BASE_URL", "http://localhost:8080")
-        client = CustomWebSearchClient(base_url)
+        # Use the new CustomWebSearchClient with proper configuration
+        base_url = os.getenv(
+            "WEB_SEARCH_BASE_URL",
+            "https://dev-infra-i18n.byteintl.net/api/v1/doubao_search",
+        )
+        client = CustomWebSearchClient(
+            base_url=base_url,
+            verify_ssl=False,  # Disable SSL verification for this endpoint
+            timeout=60,  # Increase timeout for potentially slow API
+        )
+        logger.info(
+            f"[BriefImageSearch] Using web search client with base_url: {base_url}"
+        )
         # Split queries into groups of 10
         query_groups = [
-            unique_queries[i : i + 10] for i in range(0, len(unique_queries), 10)
+            unique_queries[i : i + 5] for i in range(0, len(unique_queries), 5)
         ]
 
         async def search_group(group):
@@ -91,8 +101,13 @@ async def search_brief_outline_images(
                             group_image_reference.append(processed_img)
                 return group_image_reference
             except Exception as e:
+                import traceback
+
                 logger.error(
-                    f"[BriefImageSearch] Error in image search group: {str(e)}"
+                    f"[BriefImageSearch] Error in image search group with queries {group}: {str(e)}"
+                )
+                logger.error(
+                    f"[BriefImageSearch] Full traceback: {traceback.format_exc()}"
                 )
                 return []
 
@@ -107,9 +122,12 @@ async def search_brief_outline_images(
         )
         return brief_image_reference
     except Exception as e:
+        import traceback
+
         logger.error(
             f"[BriefImageSearch] Error in image search utility (new interface): {str(e)}"
         )
+        logger.error(f"[BriefImageSearch] Full traceback: {traceback.format_exc()}")
         return []
 
 
@@ -125,7 +143,7 @@ async def image_search_node(
 
     try:
         # Extract brief outline from state
-        brief_outline = state.get("ppt_outline", {})
+        brief_outline = state.get("brief_outline", {})
         tool_execution_history = state.get("tool_execution_history", [])
 
         # Use the existing utility function to search for images
@@ -207,7 +225,7 @@ async def gen_detailed_outline_node(
         # Prepare prompt
         prompt = await get_detailed_outline_prompt(
             user_request=user_request,
-            brief_outline=brief_outline,
+            brief_outline=json.dumps(brief_outline, ensure_ascii=False, indent=2),
             reference_material=reference_material,
         )
 

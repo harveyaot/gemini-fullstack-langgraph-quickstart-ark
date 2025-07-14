@@ -10,13 +10,6 @@ from langchain_core.runnables import RunnableConfig
 
 from ppt_agent.state import (
     PPTOverallState,
-    CoordinatorInputState,
-    WebSearchInputState,
-    OutlineInputState,
-    ModifyInputState,
-    ThemeAndPagesAckInputState,
-    FinalizeInputState,
-    HtmlInputState,
     ExecutionRecord,
 )
 from ppt_agent.configuration import PPTConfiguration
@@ -67,7 +60,7 @@ web_search_client = CustomWebSearchClient(base_url=os.getenv("WEB_SEARCH_BASE_UR
 
 
 async def coordinator_node(
-    state: CoordinatorInputState, config: RunnableConfig
+    state: PPTOverallState, config: RunnableConfig
 ) -> PPTOverallState:
     """
     Coordinator node that analyzes messages and decides next tool to use.
@@ -167,7 +160,7 @@ async def coordinator_node(
 
 
 async def web_search_node(
-    state: WebSearchInputState, config: RunnableConfig
+    state: PPTOverallState, config: RunnableConfig
 ) -> PPTOverallState:
     """
     Web search node that executes searches using the endpoint's native batch query support.
@@ -175,10 +168,11 @@ async def web_search_node(
     configurable = PPTConfiguration.from_runnable_config(config)
     logger.info("Starting web search...")
 
-    # Extract search queries from state
-    search_queries = state["queries"]  # Correct field from WebSearchInputState
-    tool_call_id = state["tool_call_id"]  # Get tool_call_id from state
-    tool_execution_history = state["tool_execution_history"]  # Get execution history
+    # Extract search queries and tool_call_id from state
+    tool_args = state.get("tool_args", {})
+    search_queries = tool_args.get("queries", [])
+    tool_call_id = tool_args.get("tool_call_id")
+    tool_execution_history = state.get("tool_execution_history", [])
 
     # Check consecutive web search limit
     max_count = configurable.max_consecutive_search_count
@@ -343,16 +337,19 @@ async def web_search_node(
 
 
 async def gen_outline_node(
-    state: OutlineInputState, config: RunnableConfig
+    state: PPTOverallState, config: RunnableConfig
 ) -> PPTOverallState:
     """Generate PPT outline based on user request and search results"""
+    logger.info("Starting brief outline generation...")
     configurable = PPTConfiguration.from_runnable_config(config)
-    logger.info("Generating PPT outline...")
 
-    tool_message = None
-    error_message = None
-    outline_data = None
-    error_info = None
+    # Extract required information from state
+    tool_args = state.get("tool_args", {})
+    user_request = tool_args.get("user_request", get_user_request(state["messages"]))
+    ref_documents = "\n\n---\n\n".join(state.get("web_results_summary", []))
+    total_pages = tool_args.get("total_pages", state.get("total_pages", 10))
+    tool_call_id = tool_args.get("tool_call_id")
+
     try:
         # Initialize LLM client
         llm_client = AsyncArkLLMClient(
@@ -361,16 +358,10 @@ async def gen_outline_node(
             model_id=configurable.flash_model,
         )
 
-        # Get input fields directly from state
-        user_request = state["user_request"]
-        ref_docs = state["ref_documents"]
-        total_pages = state["total_pages"]
-        tool_call_id = state["tool_call_id"]  # Get tool_call_id from state
-
         # Prepare prompt (using the correct placeholder names)
         prompt = brief_outline_prompt.format(
             user_request=user_request,
-            reference_material=ref_docs,
+            reference_material=ref_documents,
             total_pages=total_pages,
             current_date=get_current_date(),
         )
@@ -438,12 +429,7 @@ async def gen_outline_node(
                 "messages": [tool_message],  # Return as list of dict messages
                 "next_tool": "coordinator",
                 "tool_args": None,
-                "ppt_outline": outline_data,  # Store outline in state for HTML generation
-                "brief_outline": (
-                    json.dumps(outline_data, ensure_ascii=False, indent=2)
-                    if outline_data
-                    else ""
-                ),  # Store as formatted JSON string for prompt replacement
+                "brief_outline": outline_data,  # Store outline in state for all subsequent nodes
                 "tool_execution_history": [
                     execution_record.model_dump()
                 ],  # New execution to add
@@ -469,25 +455,26 @@ async def gen_outline_node(
 
 
 async def modify_html_node(
-    state: ModifyInputState, config: RunnableConfig
+    state: PPTOverallState, config: RunnableConfig
 ) -> PPTOverallState:
     """Modify PPT HTML based on suggestions"""
-    configurable = PPTConfiguration.from_runnable_config(config)
-    logger.info("Modifying PPT HTML...")
+    logger.info("Executing HTML modification node")
 
-    # Get input fields directly from state
-    page_number = state["page_number"]
-    modification_suggestions = state["modification_suggestions"]
-    tool_call_id = state["tool_call_id"]  # Get tool_call_id from state
+    # Extract required information from state
+    tool_args = state.get("tool_args", {})
+    page_number = tool_args.get("page_number", 1)
+    modification_suggestions = tool_args.get("modification_suggestions", "")
+    tool_call_id = tool_args.get("tool_call_id")
 
-    # Format modification response
-    modify_response = {
-        "message": "Successfully modified PPT HTML",
+    # Simulate modification process
+    modification_response = {
+        "code": 0,
         "data": {
-            "page_number": page_number,
-            "modifications": modification_suggestions,
-            "html": "<div>Modified PPT HTML content here</div>",  # Placeholder
+            "modified_page": page_number,
+            "suggestions_applied": modification_suggestions,
+            "success_message": f"Page {page_number} has been successfully modified",
         },
+        "message": f"已成功修改第{page_number}页",
     }
 
     # Create tool message
@@ -495,7 +482,7 @@ async def modify_html_node(
         "role": "tool",
         "tool_call_id": tool_call_id,  # Use tool_call_id from state
         "name": "ModifyPptHtml",
-        "content": json.dumps(modify_response),
+        "content": json.dumps(modification_response),
     }
 
     # Add execution record to history
@@ -520,26 +507,27 @@ async def modify_html_node(
 
 
 async def theme_and_pages_ack_node(
-    state: ThemeAndPagesAckInputState, config: RunnableConfig
+    state: PPTOverallState, config: RunnableConfig
 ) -> PPTOverallState:
     """Simulate external tool that presents theme and pages suggestions to user for confirmation"""
-    configurable = PPTConfiguration.from_runnable_config(config)
-    logger.info("Presenting PPT theme and pages suggestions to user...")
+    logger.info("Executing theme and pages acknowledgment node")
 
-    # Get input fields directly from state (from coordinator's tool_args)
-    suggested_theme = state["theme"]
-    suggested_pages = state["total_pages"]
-    tool_call_id = state["tool_call_id"]  # Get tool_call_id from state
+    # Extract required information from state
+    tool_args = state.get("tool_args", {})
+    theme = tool_args.get("theme", "professional")
+    total_pages = tool_args.get("total_pages", 10)
+    tool_call_id = tool_args.get("tool_call_id")
 
-    logger.info(f"Suggesting theme: {suggested_theme}, pages: {suggested_pages}")
-
-    # Simulate external tool response that presents suggestions to user
-    theme_pages_response = {
-        "message": "The user has confirmed the theme and total_pages",
+    # Simulate response after user confirmation
+    success_response = {
+        "code": 0,
         "data": {
-            "confirmed_theme": suggested_theme,
-            "confirmed_total_pages": suggested_pages,
+            "theme_accepted": True,
+            "pages_accepted": True,
+            "confirmed_theme": theme,
+            "confirmed_pages": total_pages,
         },
+        "message": f"已确认主题：{theme}，总页数：{total_pages}",
     }
 
     # Create tool message
@@ -547,7 +535,7 @@ async def theme_and_pages_ack_node(
         "role": "tool",
         "tool_call_id": tool_call_id,  # Use tool_call_id from state
         "name": "ThemeAndPagesAck",
-        "content": json.dumps(theme_pages_response),
+        "content": json.dumps(success_response),
     }
 
     # Add execution record to history
@@ -555,8 +543,8 @@ async def theme_and_pages_ack_node(
         tool_name="ppt_theme_and_pages_ack",
         status="succeeded",
         result={
-            "suggested_theme": suggested_theme,
-            "suggested_total_pages": suggested_pages,
+            "suggested_theme": theme,
+            "suggested_total_pages": total_pages,
             "user_confirmation_pending": True,
         },
     )
@@ -568,84 +556,100 @@ async def theme_and_pages_ack_node(
         "tool_execution_history": [
             execution_record.model_dump()
         ],  # New execution to add
-        "theme": suggested_theme,
-        "total_pages": suggested_pages,
+        "theme": theme,
+        "total_pages": total_pages,
     }
 
 
 async def finalize_response_node(
-    state: FinalizeInputState, config: RunnableConfig
+    state: PPTOverallState, config: RunnableConfig
 ) -> PPTOverallState:
     """
-    Async node that reads the conversation messages and provides a comprehensive summary.
+    Async node that finalizes the response and dumps key state information to JSON.
     """
     logger.info("Executing response finalization node")
 
-    # Build comprehensive response message based on conversation messages
+    # Get thread_id for JSON filename
+    thread_id = state.get("thread_id", "unknown_thread")
+
+    # Prepare selective state information for JSON dump
+    state_dump = {
+        "thread_id": thread_id,
+        "image_search_results": state.get("images_gathered", []),
+        "brief_outline": state.get("brief_outline", {}),
+        "detailed_outline": state.get("detailed_outline", []),
+        "all_slides_html": state.get("all_slides_html", []),
+        #    "sources_gathered": state.get("sources_gathered", []),
+        #    "web_results_summary": state.get("web_results_summary", []),
+        "theme": state.get("theme"),
+        "total_pages": state.get("total_pages"),
+        "scenario": state.get("scenario"),
+    }
+
+    # Dump to JSON file named with thread_id
+    import os
+    import asyncio
+
+    await asyncio.to_thread(os.makedirs, "output", exist_ok=True)
+    json_filename = f"output/{thread_id}.json"
+
+    try:
+
+        def write_json_file():
+            with open(json_filename, "w", encoding="utf-8") as f:
+                json.dump(state_dump, f, ensure_ascii=False, indent=2)
+
+        await asyncio.to_thread(write_json_file)
+        logger.info(f"State information dumped to {json_filename}")
+    except Exception as e:
+        logger.error(f"Failed to dump state to JSON: {str(e)}")
+
+    # Build simplified response using direct state access
     response_parts = []
 
-    # Extract information from tool messages in the conversation
-    outline_data = None
-    html_result = None
-    modification_result = None
-    sources = []
-
-    for msg in state["messages"]:
-        if msg.get("role") == "tool":
-            try:
-                content = json.loads(msg["content"])
-
-                if msg["name"] == "GenPptOutline" and content.get("code") == 0:
-                    outline_data = content.get("data", {})
-                elif msg["name"] == "GenPptHtml" and content.get("code") == 0:
-                    html_result = content.get("data", {})
-                elif msg["name"] == "ModifyPptHtml" and content.get("code") == 0:
-                    modification_result = content.get("data", {})
-                elif msg["name"] == "WebSearch" and content.get("code") == 0:
-                    sources.extend(content.get("data", {}).get("sources", []))
-            except (json.JSONDecodeError, AttributeError):
-                continue
-
-    # Build response based on found information
-    if outline_data:
+    # Brief outline information
+    if state.get("brief_outline"):
+        outline = state["brief_outline"]
         response_parts.append(
-            f"## PPT大纲：{outline_data.get('ppt_title', 'Generated PPT')}"
+            f"## PPT大纲：{outline.get('ppt_title', 'Generated PPT')}"
         )
+        if state.get("total_pages"):
+            response_parts.append(f"总页数：{state['total_pages']}")
 
-        if "slides" in outline_data:
-            total_pages = sum(
-                slide.get("current_slide_page_counts", 1)
-                for slide in outline_data["slides"]
+    # Detailed outline information
+    if state.get("detailed_outline"):
+        response_parts.append("\n### 幻灯片结构：")
+        for i, slide in enumerate(state["detailed_outline"], 1):
+            response_parts.append(
+                f"{i}. {slide.get('title', 'Untitled')} ({slide.get('current_slide_page_counts', 1)}页)"
             )
-            response_parts.append(f"总页数：{total_pages}")
+            response_parts.append(f"   内容：{slide.get('content', 'No content')}")
 
-            response_parts.append("\n### 幻灯片结构：")
-            for i, slide in enumerate(outline_data["slides"], 1):
-                response_parts.append(
-                    f"{i}. {slide.get('title', 'Untitled')} ({slide.get('current_slide_page_counts', 1)}页)"
-                )
-                response_parts.append(f"   内容：{slide.get('content', 'No content')}")
-
-    # Add generation result
-    if html_result:
+    # HTML generation result
+    if state.get("all_slides_html"):
         response_parts.append(f"\n## PPT生成成功！")
-        response_parts.append(
-            f"访问地址：{html_result.get('remote_address', 'No URL')}"
-        )
-        response_parts.append(f"主题：{html_result.get('theme', 'professional')}")
-        response_parts.append(f"页数：{html_result.get('pages_generated', 'Unknown')}")
+        response_parts.append(f"已生成 {len(state['all_slides_html'])} 页幻灯片")
+        if state.get("theme"):
+            response_parts.append(f"主题：{state['theme']}")
 
-    # Add modification results
-    if modification_result:
+    # Image search results
+    if state.get("images_gathered"):
         response_parts.append(
-            f"\n## 修改完成：{modification_result.get('success_message', '修改成功')}"
+            f"\n## 图片搜索：找到 {len(state['images_gathered'])} 张相关图片"
         )
 
-    # Add research sources if available
-    if sources:
-        response_parts.append("\n## 参考资料：")
-        for source in sources[:5]:  # Limit to first 5 sources
-            response_parts.append(f"- [{source['title']}]({source['value']})")
+    # Research sources
+    if state.get("sources_gathered"):
+        response_parts.append(
+            f"\n## 参考资料：收集了 {len(state['sources_gathered'])} 个来源"
+        )
+        for source in state["sources_gathered"][:5]:  # Limit to first 5 sources
+            response_parts.append(
+                f"- [{source.get('title', 'Unknown')}]({source.get('url', '#')})"
+            )
+
+    # State dump information
+    response_parts.append(f"\n## 状态信息已保存到：{json_filename}")
 
     final_response = (
         "\n".join(response_parts)
@@ -660,7 +664,12 @@ async def finalize_response_node(
     execution_record = ExecutionRecord(
         tool_name="finalize",
         status="succeeded",
-        result={"response_length": len(final_response), "finalization_completed": True},
+        result={
+            "response_length": len(final_response),
+            "finalization_completed": True,
+            "json_file": json_filename,
+            "state_dump_keys": list(state_dump.keys()),
+        },
     )
 
     return {
@@ -762,7 +771,7 @@ async def research_reflection_node(
 def route_after_reflection(state: PPTOverallState) -> Send:
     """
     Route after reflection based on the reflection results.
-    Directly sends to appropriate node with proper input state.
+    Directly sends to appropriate node with the entire state.
     """
     should_continue = state.get("reflection_should_continue", False)
     suggested_queries = state.get("reflection_suggested_queries", [])
@@ -771,14 +780,12 @@ def route_after_reflection(state: PPTOverallState) -> Send:
         logger.info(
             f"Reflection suggests continuing search with {len(suggested_queries)} queries"
         )
-
-        # Create WebSearchInputState for the new search
-        search_state = WebSearchInputState(
-            queries=suggested_queries,
-            tool_call_id=f"reflect_{abs(hash(str(suggested_queries))) % 100000}",  # Fake tool_call_id for reflection-triggered searches
-            tool_execution_history=state.get("tool_execution_history", []),
-        )
-        return Send("web_search_node", search_state)
+        # Set the suggested queries in tool_args for web search to pick up
+        state["tool_args"] = {
+            "queries": suggested_queries,
+            "tool_call_id": f"reflect_{abs(hash(str(suggested_queries))) % 100000}",
+        }
+        return Send("web_search_node", state)
     else:
         logger.info("Reflection suggests proceeding to coordinator")
         return "coordinator_node"
@@ -861,89 +868,30 @@ def create_ppt_graph():
 
 def route_to_tool_node(state: PPTOverallState) -> Send:
     """
-    Router that converts general state into specific state for each node.
-    This is where the magic happens - each node gets exactly what it needs.
+    Router that sends the entire state to each node.
+    Each node can extract what it needs from the PPTOverallState.
     """
     next_tool = state.get("next_tool", "finalize")
-    tool_args = state.get("tool_args", {})
-    messages = state["messages"]
-
-    # Handle case where tool_args might be None
-    if tool_args is None:
-        tool_args = {}
-
-    # Get tool_call_id from tool_args
-    tool_call_id = tool_args.get("tool_call_id")
 
     # Handle web search
     if next_tool == "web_search":
-        # Use tool_args queries (reflection routing is handled separately)
-        queries = tool_args.get("queries", [])
-        tool_execution_history = state.get("tool_execution_history", [])
-        specific_state = WebSearchInputState(
-            queries=queries,
-            tool_call_id=tool_call_id,
-            tool_execution_history=tool_execution_history,
-        )
-        return Send("web_search_node", specific_state)
-
-    # Remove the research_reflection routing since it only comes from web_search now
+        return Send("web_search_node", state)
 
     elif next_tool == "ppt_theme_and_pages_ack":
-        # Theme and pages acknowledgment node only needs theme and total_pages from tool_args
-        theme = tool_args.get("theme", "professional")
-        total_pages = tool_args.get("total_pages", 10)
-        specific_state = ThemeAndPagesAckInputState(
-            theme=theme,
-            total_pages=total_pages,
-            tool_call_id=tool_call_id,
-        )
-        return Send("theme_and_pages_ack_node", specific_state)
+        return Send("theme_and_pages_ack_node", state)
 
     elif next_tool == "generate_ppt_outline":
-        # Outline group entry point - starts with brief outline generation
-        user_request = tool_args.get("user_request", get_user_request(messages))
-        ref_documents = "\n\n---\n\n".join(state.get("web_results_summary", []))
-        total_pages = tool_args.get("total_pages", state.get("total_pages", 10))
-        specific_state = OutlineInputState(
-            user_request=user_request,
-            ref_documents=ref_documents,
-            total_pages=total_pages,
-            tool_call_id=tool_call_id,
-        )
-        return Send("gen_outline_node", specific_state)
+        return Send("gen_outline_node", state)
 
     elif next_tool == "generate_ppt_html":
-        # HTML generation group entry point - starts with style layout
-        user_request = tool_args.get("user_request", get_user_request(messages))
-        ppt_outline = state.get("ppt_outline", {})  # Brief outline
-        detailed_outline = state.get("detailed_outline", [])  # Detailed outline
-        theme = tool_args.get("theme", state.get("theme", "professional"))
-        specific_state = HtmlInputState(
-            user_request=user_request,
-            ppt_outline=ppt_outline,
-            detailed_outline=detailed_outline,
-            theme=theme,
-            tool_call_id=tool_call_id,
-        )
-        return Send("gen_style_layout_node", specific_state)
+        return Send("gen_style_layout_node", state)
 
     elif next_tool == "modify_ppt_html":
-        # Modify node needs page number and modification suggestions
-        page_number = tool_args.get("page_number", 1)
-        modification_suggestions = tool_args.get("modification_suggestions", "")
-
-        specific_state = ModifyInputState(
-            page_number=page_number,
-            modification_suggestions=modification_suggestions,
-            tool_call_id=tool_call_id,
-        )
-        return Send("modify_html_node", specific_state)
+        return Send("modify_html_node", state)
 
     else:
-        # Default to finalize
-        specific_state = FinalizeInputState(messages=messages)
-        return Send("finalize_response_node", specific_state)
+        # Default to finalize - pass entire state since finalize needs access to all state fields for JSON dumping
+        return Send("finalize_response_node", state)
 
 
 # Export the compiled graph
