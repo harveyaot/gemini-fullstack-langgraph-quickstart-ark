@@ -28,8 +28,8 @@ from ppt_agent.utils import (
 )
 
 # Import shared components from agent module
-from agent.ark_client import AsyncArkLLMClient
-from agent.web_search_client import CustomWebSearchClient, WebSearchRequest
+from ppt_agent.ark_client import AsyncArkLLMClient
+from ppt_agent.web_search_client import CustomWebSearchClient, WebSearchRequest
 
 # Import new nodes
 from ppt_agent.intra_nodes import (
@@ -279,16 +279,26 @@ async def web_search_node(
             llm_client = AsyncArkLLMClient(
                 api_key=os.getenv("ARK_API_KEY"),
                 base_url=os.getenv("ARK_BASE_URL"),
-                model_id=configurable.flash_model,
+                model_id=configurable.web_summary_model,
             )
 
-            # Create tasks for all groups and run them in parallel
+            # Create semaphore to limit concurrent LLM calls to 5
+            semaphore = asyncio.Semaphore(5)
+
+            async def summarize_group_with_limit(llm_client, group, group_idx):
+                """Wrapper to add concurrency control to summarize_group"""
+                async with semaphore:
+                    return await summarize_group(llm_client, group, group_idx)
+
+            # Create tasks for all groups and run them in parallel with concurrency control
             tasks = [
-                summarize_group(llm_client, group, group_idx)
+                summarize_group_with_limit(llm_client, group, group_idx)
                 for group_idx, group in enumerate(source_groups)
             ]
-            logger.info(f"Step 7: Created {len(tasks)} groups for summarization")
-            # Execute all summarization tasks in parallel
+            logger.info(
+                f"Step 7: Created {len(tasks)} groups for summarization with max 5 concurrent"
+            )
+            # Execute all summarization tasks in parallel with concurrency control
             summarized_chunks = await asyncio.gather(*tasks)
 
         # Format successful results with summarized content
@@ -333,6 +343,7 @@ async def web_search_node(
             "tool_execution_history": [execution_record.model_dump()],
             "sources_gathered": sources_gathered,
             "web_results_summary": [web_results_summary],
+            "web_queries": search_queries,  # Track the searched web queries
         }
 
 
@@ -355,7 +366,7 @@ async def gen_outline_node(
         llm_client = AsyncArkLLMClient(
             api_key=os.getenv("ARK_API_KEY"),
             base_url=os.getenv("ARK_BASE_URL"),
-            model_id=configurable.flash_model,
+            model_id=configurable.brief_outline_model,
         )
 
         # Prepare prompt (using the correct placeholder names)
@@ -581,6 +592,8 @@ async def finalize_response_node(
         "all_slides_html": state.get("all_slides_html", []),
         #    "sources_gathered": state.get("sources_gathered", []),
         #    "web_results_summary": state.get("web_results_summary", []),
+        "image_queries": state.get("image_queries", []),
+        "web_queries": state.get("web_queries", []),
         "theme": state.get("theme"),
         "total_pages": state.get("total_pages"),
         "scenario": state.get("scenario"),

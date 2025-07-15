@@ -14,7 +14,6 @@ from ppt_agent.state import (
 )
 from ppt_agent.configuration import PPTConfiguration
 from ppt_agent.prompts import (
-    get_current_date,
     get_detailed_outline_prompt,
     get_style_layout_prompt,
     get_template_prompt,
@@ -34,13 +33,13 @@ logger = logging.getLogger(__name__)
 
 async def search_brief_outline_images(
     brief_outline: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+) -> tuple[List[Dict[str, Any]], List[str]]:
     """
     Utility function to search for images based on brief outline's picture_advise using the new web_search_client interface.
     Args:
         brief_outline: Brief outline containing slides with picture_advise
     Returns:
-        List of processed image references
+        tuple: (List of processed image references, List of searched queries)
     """
     try:
         logger.info(
@@ -75,43 +74,47 @@ async def search_brief_outline_images(
         logger.info(
             f"[BriefImageSearch] Using web search client with base_url: {base_url}"
         )
-        # Split queries into groups of 10
+        # Split queries into groups of 5
         query_groups = [
             unique_queries[i : i + 5] for i in range(0, len(unique_queries), 5)
         ]
 
+        # Create semaphore to limit concurrent requests to 5
+        semaphore = asyncio.Semaphore(5)
+
         async def search_group(group):
-            req = ImageSearchRequest(queries=group, count=3)
-            try:
-                response = await client.image_search(req)
-                group_image_reference = []
-                if response and response.data and response.data.items:
-                    for query, images in response.data.items.items():
-                        for img in images:
-                            processed_img = {
-                                "query": query,
-                                "desc": img.desc,
-                                "features": img.features,
-                                "format": img.format,
-                                "width": img.width,
-                                "height": img.height,
-                                "image_urls": img.image_urls,
-                                "source_webpage": img.source_webpage,
-                            }
-                            group_image_reference.append(processed_img)
-                return group_image_reference
-            except Exception as e:
-                import traceback
+            async with semaphore:  # Limit concurrent execution
+                req = ImageSearchRequest(queries=group, count=3)
+                try:
+                    response = await client.image_search(req)
+                    group_image_reference = []
+                    if response and response.data and response.data.items:
+                        for query, images in response.data.items.items():
+                            for img in images:
+                                processed_img = {
+                                    "query": query,
+                                    "desc": img.desc,
+                                    "features": img.features,
+                                    "format": img.format,
+                                    "width": img.width,
+                                    "height": img.height,
+                                    "image_urls": img.image_urls,
+                                    "source_webpage": img.source_webpage,
+                                }
+                                group_image_reference.append(processed_img)
+                    return group_image_reference
+                except Exception as e:
+                    import traceback
 
-                logger.error(
-                    f"[BriefImageSearch] Error in image search group with queries {group}: {str(e)}"
-                )
-                logger.error(
-                    f"[BriefImageSearch] Full traceback: {traceback.format_exc()}"
-                )
-                return []
+                    logger.error(
+                        f"[BriefImageSearch] Error in image search group with queries {group}: {str(e)}"
+                    )
+                    logger.error(
+                        f"[BriefImageSearch] Full traceback: {traceback.format_exc()}"
+                    )
+                    return []
 
-        # Run all groups in parallel
+        # Run all groups in parallel with concurrency control
         all_results = await asyncio.gather(
             *(search_group(group) for group in query_groups)
         )
@@ -120,7 +123,7 @@ async def search_brief_outline_images(
         logger.info(
             f"[BriefImageSearch] Processed {len(brief_image_reference)} image references (new interface)"
         )
-        return brief_image_reference
+        return brief_image_reference, unique_queries
     except Exception as e:
         import traceback
 
@@ -128,7 +131,7 @@ async def search_brief_outline_images(
             f"[BriefImageSearch] Error in image search utility (new interface): {str(e)}"
         )
         logger.error(f"[BriefImageSearch] Full traceback: {traceback.format_exc()}")
-        return []
+        return [], []
 
 
 async def image_search_node(
@@ -150,7 +153,9 @@ async def image_search_node(
         logger.info(
             "Searching for images based on brief outline picture recommendations..."
         )
-        images_gathered = await search_brief_outline_images(brief_outline)
+        images_gathered, searched_queries = await search_brief_outline_images(
+            brief_outline
+        )
 
         logger.info(f"Image search completed with {len(images_gathered)} images found")
 
@@ -167,6 +172,7 @@ async def image_search_node(
         # Return updated state with image data
         return {
             "images_gathered": images_gathered,
+            "image_queries": searched_queries,  # Track the searched image queries
             "tool_execution_history": [execution_record.model_dump()],
         }
 
@@ -185,6 +191,7 @@ async def image_search_node(
 
         return {
             "images_gathered": [],
+            "image_queries": [],  # No queries if search failed
             "tool_execution_history": [execution_record.model_dump()],
         }
 
@@ -201,7 +208,7 @@ async def gen_detailed_outline_node(
         llm_client = AsyncArkLLMClient(
             api_key=os.getenv("ARK_API_KEY"),
             base_url=os.getenv("ARK_BASE_URL"),
-            model_id=configurable.flash_model,
+            model_id=configurable.detailed_outline_model,
         )
 
         # Extract data from overall state (passed from image_search_node)
@@ -296,7 +303,7 @@ async def gen_style_layout_node(
         llm_client = AsyncArkLLMClient(
             api_key=os.getenv("ARK_API_KEY"),
             base_url=os.getenv("ARK_BASE_URL"),
-            model_id=configurable.flash_model,
+            model_id=configurable.ppt_gen_model,
         )
 
         # Extract data from overall state (entry point receives HtmlInputState data)
@@ -377,7 +384,7 @@ async def gen_template_node(
         llm_client = AsyncArkLLMClient(
             api_key=os.getenv("ARK_API_KEY"),
             base_url=os.getenv("ARK_BASE_URL"),
-            model_id=configurable.flash_model,
+            model_id=configurable.ppt_gen_model,
         )
 
         # Extract data from overall state (passed from gen_style_layout_node)
@@ -446,7 +453,7 @@ async def gen_html_code_node(
         llm_client = AsyncArkLLMClient(
             api_key=os.getenv("ARK_API_KEY"),
             base_url=os.getenv("ARK_BASE_URL"),
-            model_id=configurable.flash_model,
+            model_id=configurable.ppt_gen_model,
         )
 
         # Extract data from overall state (accumulated through the workflow)
@@ -455,25 +462,29 @@ async def gen_html_code_node(
         ppt_outline = state.get("detailed_outline", [])
 
         # Generate HTML for all slides in parallel
+        # Create semaphore to limit concurrent LLM calls to 5
+        semaphore = asyncio.Semaphore(5)
+
         async def generate_slide_html(slide_number: int) -> str:
             """Generate HTML for a single slide"""
-            prompt = await get_html_code_prompt(
-                slide_number=slide_number,
-                ppt_input=style_layout,  # Use style_layout like in deprecated_graph.py
-                template_html=template_pages.get("content", ""),
-            )
+            async with semaphore:  # Limit concurrent execution
+                prompt = await get_html_code_prompt(
+                    slide_number=slide_number,
+                    ppt_input=style_layout,  # Use style_layout like in deprecated_graph.py
+                    template_html=template_pages.get("content", ""),
+                )
 
-            logger.info(f"Generating HTML for slide {slide_number}")
+                logger.info(f"Generating HTML for slide {slide_number}")
 
-            # Get HTML code from LLM
-            prompt_messages = [{"role": "user", "content": prompt}]
-            html_response = await llm_client.ainvoke(prompt_messages)
+                # Get HTML code from LLM
+                prompt_messages = [{"role": "user", "content": prompt}]
+                html_response = await llm_client.ainvoke(prompt_messages)
 
-            # Parse and clean the HTML
-            slide_html = _parse_html_code_from_content(html_response)
-            return slide_html
+                # Parse and clean the HTML
+                slide_html = _parse_html_code_from_content(html_response)
+                return slide_html
 
-        # Execute all slide generations in parallel
+        # Execute all slide generations in parallel with concurrency control
         slide_tasks = [
             generate_slide_html(i)
             for i, _ in enumerate(
@@ -482,7 +493,9 @@ async def gen_html_code_node(
         ]
         all_slides_html = await asyncio.gather(*slide_tasks)
 
-        logger.info(f"Successfully generated HTML for {len(all_slides_html)} slides")
+        logger.info(
+            f"Successfully generated HTML for {len(all_slides_html)} slides with max 5 concurrent"
+        )
 
         # Create tool message for coordinator (without heavy HTML content)
         html_result = {

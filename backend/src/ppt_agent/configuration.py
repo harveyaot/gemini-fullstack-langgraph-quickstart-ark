@@ -20,18 +20,44 @@ class PPTConfiguration(BaseModel):
         },
     )
 
-    outline_model: str = Field(
-        default="ep-20250619204324-ml2lb",
+    brief_outline_model: str = Field(
+        default="ep-20250611103625-7trbw",  # Default to main_model
         metadata={
-            "description": "The language model to use for PPT outline generation."
+            "description": "The language model to use for brief outline generation."
         },
     )
 
-    search_model: str = Field(
-        default="ep-20250619204324-ml2lb",
+    detailed_outline_model: str = Field(
+        default="ep-20250611103625-7trbw",  # Default to main_model
         metadata={
-            "description": "The language model to use for web search processing."
+            "description": "The language model to use for detailed outline generation."
         },
+    )
+
+    web_summary_model: str = Field(
+        default="ep-20250611103625-7trbw",  # Default to main_model
+        metadata={
+            "description": "The language model to use for web search results summarization."
+        },
+    )
+
+    image_filter_model: str = Field(
+        default="ep-20250611103625-7trbw",  # Default to main_model
+        metadata={
+            "description": "The language model to use for image filtering and selection."
+        },
+    )
+
+    reflection_model: str = Field(
+        default="ep-20250611103625-7trbw",  # Default to main_model
+        metadata={
+            "description": "The language model to use for reflection and analysis."
+        },
+    )
+
+    ppt_gen_model: str = Field(
+        default="ep-20250611103625-7trbw",  # Default to main_model
+        metadata={"description": "The language model to use for PPT HTML generation."},
     )
 
     default_theme: str = Field(

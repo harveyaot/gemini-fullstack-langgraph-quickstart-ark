@@ -35,6 +35,8 @@ class PPTOverallState(TypedDict):
         List[Dict[str, Any]], operator.add
     ]  # Search results from image searches
     # Tool execution tracking
+    web_queries: Annotated[List[str], operator.add]  # Web search queries
+    image_queries: Annotated[List[str], operator.add]  # Image search queries
     tool_execution_history: Annotated[
         List[Dict[str, Any]], operator.add
     ]  # Track each node execution and results
